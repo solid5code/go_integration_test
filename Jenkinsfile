@@ -1,94 +1,94 @@
 pipeline {
-    // 設置 Agent，這裡使用 Docker 代理，因為它更容易設置 Golang 環境
+    // 使用 Golang 官方 Docker 映像作為構建和測試環境，確保環境隔離和一致性
     agent {
-        // 使用官方 Go 映像作為構建和測試環境
         docker {
             image 'golang:1.22'
-            args '-u 0:0' // 確保文件權限問題被避免
+            // 允許容器內產生文件 (例如 allure-results) 且權限正確
+            args '-u 0:0'
         }
     }
 
-    // 設置工具，確保 Jenkins 知道 go-junit-report 的路徑
-    tools {
-        // 假設 go-junit-report 已經被安裝到環境中
-        // 如果您使用上面的 Docker agent，可以通過 sh 腳本安裝
+    // 環境變數：設定 Allure 報告的輸出路徑
+    environment {
+        ALLURE_RESULTS_PATH = 'allure-results'
     }
 
     stages {
         // ----------------------------------------
-        // 1. 環境準備
+        // 1. 環境準備 (在 Docker 容器內)
         // ----------------------------------------
-        stage('Environment Setup') {
+        stage('Prepare Environment') {
             steps {
-                sh 'go install github.com/jstemmer/go-junit-report/v2@latest'
+                echo 'Cleaning up existing allure results directory...'
+                // 確保報告目錄乾淨
+                sh "rm -rf ${env.ALLURE_RESULTS_PATH}"
+                sh "mkdir -p ${env.ALLURE_RESULTS_PATH}"
             }
         }
 
         // ----------------------------------------
-        // 2. 構建 (Build)
+        // 2. 依賴與構建
         // ----------------------------------------
-        stage('Build') {
+        stage('Install Dependencies & Build') {
             steps {
-                echo 'Starting Go project build...'
-                // 根據您的專案需要執行構建，例如：
-                sh 'go build -o my_app ./cmd/main.go'
-                // 如果是微服務，可能還需要構建 Docker Image
+                echo 'Installing Go dependencies...'
+                // 下載並安裝專案依賴，特別是 allure-go 庫
+                sh 'go mod tidy'
+
+                // 執行 Go 專案構建（如果您的整合測試需要執行檔）
+                // 這裡我們假設只需要測試檔案，但保留 Build 階段是好習慣
+                // sh 'go build -o my_app .'
             }
         }
 
         // ----------------------------------------
-        // 3. 執行整合測試 (Integration Test)
+        // 3. 執行整合測試
         // ----------------------------------------
         stage('Run Integration Tests') {
             steps {
-                echo 'Running Integration Tests and converting to JUnit-XML...'
-                // 運行測試並使用 go-junit-report 轉換輸出
-                // 這裡的 go-junit-report 命令會將結果導出到 allure-results/junit.xml
-                // Allure 插件可以直接處理 JUnit-XML 檔案
-                sh '''
-                    mkdir -p allure-results
-                    go test -v ./... | go-junit-report > allure-results/junit.xml
-                '''
-                // 如果您已經將命令包裝在腳本中，則執行：
-                // sh './run_integration_tests.sh'
+                echo 'Running Allure-Go Integration Tests...'
+                // 關鍵步驟：設定 ALLURE_RESULTS_PATH 環境變數 (已在 environment 區塊設定)
+                // 執行 go test，它會自動將 JSON 報告寫入 ALLURE_RESULTS_PATH
+                sh "go test -v ./..."
             }
         }
 
         // ----------------------------------------
-        // 4. 生成 Allure Report (Report Generation)
+        // 4. 生成並發布 Allure Report
         // ----------------------------------------
-        stage('Generate Allure Report') {
+        stage('Publish Allure Report') {
             steps {
-                // Archive the generated test results
-                archiveArtifacts artifacts: 'allure-results/*.xml', onlyIfSuccessful: true
+                echo 'Generating and Publishing Allure Report...'
 
-                // The Allure Jenkins Plugin generates the report
-                // **注意:** results: 'allure-results' 必須指向包含測試結果文件 (.xml, .json, .properties, etc.) 的目錄
+                // 使用 Allure Jenkins Plugin 提供的指令
+                // results: 必須指向存放 JSON 檔案的目錄 (即 ALLURE_RESULTS_PATH)
                 allure([
                     includeProperties: false,
                     jdk: '',
                     properties: [],
                     reportBuildPolicy: 'ALWAYS',
-                    results: [[path: 'allure-results']]
+                    results: [[path: env.ALLURE_RESULTS_PATH]]
                 ])
-                echo 'Allure Report generated and published!'
+
+                // 為了方便除錯，如果需要，可以將原始 JSON 文件作為 Artifacts 歸檔
+                archiveArtifacts artifacts: "${env.ALLURE_RESULTS_PATH}/*.json", onlyIfSuccessful: false
             }
         }
     }
 
     // ----------------------------------------
-    // 報告後處理 (Post-build Actions)
+    // 報告後處理
     // ----------------------------------------
     post {
         always {
-            // 清理工作區
+            // 清理工作區，釋放 Jenkins Agent 上的空間
             cleanWs()
         }
         success {
-            echo 'Pipeline finished successfully!'
+            echo 'Pipeline finished successfully. Check the Allure Report link!'
         }
         failure {
-            echo 'Pipeline failed. Check the logs for details.'
+            echo 'Pipeline failed. Check test logs.'
         }
     }
 }
